@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use Illuminate\Support\Facades\Cache;
 use Workerman\Connection\TcpConnection;
 
 /**
@@ -39,7 +40,7 @@ class NodeRegistry
     public static function remove(int $nodeId, ?TcpConnection $conn = null): void
     {
         if ($conn !== null && isset(self::$connections[$nodeId]) && self::$connections[$nodeId] !== $conn) {
-            return; // already replaced by a newer connection
+            return;
         }
         unset(self::$connections[$nodeId]);
     }
@@ -72,8 +73,6 @@ class NodeRegistry
             return false;
         }
 
-        // Machine-mode connections multiplex multiple node IDs through the same
-        // socket, so node-scoped events must carry node_id for the client mux.
         if (!empty($conn->machineNodeIds) && $event !== 'sync.nodes' && !array_key_exists('node_id', $data)) {
             $data['node_id'] = $nodeId;
         }
@@ -90,7 +89,8 @@ class NodeRegistry
 
     /**
      * Update in-memory registry when a machine's node set changes.
-     * Called from the WS process when a sync.nodes event is dispatched.
+     * Cache membership is updated at the same time so config pushes work
+     * immediately for newly attached tasks and do not target removed tasks.
      */
     public static function refreshMachineNodes(int $machineId, array $newNodeIds): void
     {
@@ -101,17 +101,19 @@ class NodeRegistry
 
         $oldNodeIds = $conn->machineNodeIds ?? [];
 
-        // Remove nodes no longer on this machine
         foreach (array_diff($oldNodeIds, $newNodeIds) as $removedId) {
+            $removedId = (int) $removedId;
             self::remove($removedId, $conn);
+            Cache::forget("node_ws_alive:{$removedId}");
         }
 
-        // Add newly assigned nodes (via add() to close any stale standalone connection)
         foreach ($newNodeIds as $nodeId) {
+            $nodeId = (int) $nodeId;
             self::add($nodeId, $conn);
+            Cache::put("node_ws_alive:{$nodeId}", true, 86400);
         }
 
-        $conn->machineNodeIds = $newNodeIds;
+        $conn->machineNodeIds = array_map('intval', $newNodeIds);
     }
 
     public static function sendMachine(int $machineId, string $event, array $data): bool
@@ -131,19 +133,13 @@ class NodeRegistry
         return true;
     }
 
-    /**
-     * Get the connection for a node by ID, checking if it's still alive.
-     */
     public static function isOnline(int $nodeId): bool
     {
         $conn = self::get($nodeId);
         return $conn !== null && $conn->getStatus() === TcpConnection::STATUS_ESTABLISHED;
     }
 
-    /**
-     * Get all connected node IDs.
-     * @return int[]
-     */
+    /** @return int[] */
     public static function getConnectedNodeIds(): array
     {
         return array_keys(self::$connections);
@@ -154,9 +150,7 @@ class NodeRegistry
         return count(self::$connections);
     }
 
-    /**
-     * @return int[]
-     */
+    /** @return int[] */
     public static function getConnectedMachineIds(): array
     {
         return array_keys(self::$machineConnections);
@@ -167,4 +161,3 @@ class NodeRegistry
         return count(self::$machineConnections);
     }
 }
-
