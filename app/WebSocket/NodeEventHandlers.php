@@ -37,22 +37,22 @@ class NodeEventHandlers
     }
 
     /**
-     * Handle device report from node
-     * 
-     * 数据格式: {"event": "report.devices", "data": {userId: [ip1, ip2, ...], ...}}
+     * Handle device report from node.
      */
     public static function handleDeviceReport(TcpConnection $conn, int $nodeId, array $data): void
     {
+        $node = Server::find($nodeId);
+        if (!$node || self::isManagedRelay($node)) {
+            return;
+        }
+
         $service = app(DeviceStateService::class);
 
         if (isset($data['devices']) && is_array($data['devices'])) {
             $data = $data['devices'];
         }
 
-        // Get old data
         $oldDevices = $service->getNodeDevices($nodeId);
-
-        // Calculate diff
         $removedUsers = array_diff_key($oldDevices, $data);
         $newDevices = [];
 
@@ -62,30 +62,29 @@ class NodeEventHandlers
             }
         }
 
-        // Handle removed users
         foreach ($removedUsers as $userId => $ips) {
             $service->removeNodeDevices($nodeId, $userId);
             $service->notifyUpdate($userId);
         }
 
-        // Handle new/updated users
         foreach ($newDevices as $userId => $ips) {
             $service->setDevices($userId, $nodeId, $ips);
         }
 
-        // Mark for push
         Redis::sadd('device:push_pending_nodes', $nodeId);
 
         Log::debug("[WS] Node#{$nodeId} synced " . count($newDevices) . " users, removed " . count($removedUsers));
     }
 
     /**
-     * Handle device state request from node
+     * Handle device state request from node.
      */
     public static function handleDeviceRequest(TcpConnection $conn, int $nodeId, array $data = []): void
     {
         $node = Server::find($nodeId);
-        if (!$node) return;
+        if (!$node || self::isManagedRelay($node)) {
+            return;
+        }
 
         $users = ServerService::getAvailableUsers($node);
         $userIds = $users->pluck('id')->toArray();
@@ -101,12 +100,14 @@ class NodeEventHandlers
     }
 
     /**
-     * Push device state to node
+     * Push device state to node.
      */
     public static function pushDeviceStateToNode(int $nodeId, DeviceStateService $service): void
     {
         $node = Server::find($nodeId);
-        if (!$node) return;
+        if (!$node || self::isManagedRelay($node)) {
+            return;
+        }
 
         $users = ServerService::getAvailableUsers($node);
         $userIds = $users->pluck('id')->toArray();
@@ -120,19 +121,23 @@ class NodeEventHandlers
     }
 
     /**
-     * Push full config + users to newly connected node
+     * Push full config + users to newly connected node.
+     * Managed relays receive config only; authentication/accounting stays on the parent service.
      */
     public static function pushFullSync(TcpConnection $conn, Server $node): void
     {
         $nodeId = (int) $node->id;
 
-        // Push config
         $config = ServerService::buildNodeConfig($node);
         NodeRegistry::send($nodeId, 'sync.config', [
             'config' => $config,
         ]);
 
-        // Push users
+        if (self::isManagedRelay($node)) {
+            Log::info("[WS] Relay config pushed to node#{$nodeId}");
+            return;
+        }
+
         $users = ServerService::getAvailableUsers($node)->toArray();
         NodeRegistry::send($nodeId, 'sync.users', [
             'users' => $users,
@@ -141,5 +146,10 @@ class NodeEventHandlers
         Log::info("[WS] Full sync pushed to node#{$nodeId}", [
             'users' => count($users),
         ]);
+    }
+
+    private static function isManagedRelay(Server $node): bool
+    {
+        return !empty($node->parent_id) && !empty($node->machine_id);
     }
 }
