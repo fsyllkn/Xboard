@@ -205,7 +205,7 @@ class MachineController extends Controller
         $installerUrl = 'https://raw.githubusercontent.com/fsyllkn/Xboard-Node/dev/install.sh';
 
         return sprintf(
-            'curl -fsSL %s | sudo bash -s -- --mode machine --branch dev --source --panel %s --token %s --machine-id %d',
+            'curl -fsSL %s | sudo bash -s -- --mode machine --branch dev --panel %s --token %s --machine-id %d',
             $installerUrl,
             escapeshellarg($panelUrl),
             escapeshellarg($machine->token),
