@@ -4,6 +4,7 @@ namespace App\Observers;
 
 use App\Models\Server;
 use App\Services\NodeSyncService;
+use Illuminate\Support\Facades\Log;
 
 class ServerObserver
 {
@@ -89,16 +90,29 @@ class ServerObserver
         }
 
         $machines = [];
+        $needsRediscovery = $topologyChanged;
         foreach ($children as $child) {
             if (!$topologyChanged) {
-                NodeSyncService::notifyConfigUpdated($child->id);
+                try {
+                    NodeSyncService::notifyConfigUpdated($child->id);
+                } catch (\Throwable $e) {
+                    // The parent may have been saved with an invalid endpoint
+                    // by an older client. Do not turn a committed admin update
+                    // into a 500 or leave a stale relay task running.
+                    $needsRediscovery = true;
+                    Log::warning('[ServerObserver] relay config push failed; falling back to node rediscovery', [
+                        'parent_id' => $parentId,
+                        'child_id' => $child->id,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
             }
             if ($child->machine_id) {
                 $machines[(int) $child->machine_id] = true;
             }
         }
 
-        if ($topologyChanged) {
+        if ($needsRediscovery) {
             foreach (array_keys($machines) as $machineId) {
                 NodeSyncService::notifyMachineNodesChanged($machineId);
             }
