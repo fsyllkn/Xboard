@@ -9,6 +9,15 @@ class ServerObserver
 {
     public bool $afterCommit = true;
 
+    /**
+     * A copied node must not immediately deploy onto the source machine.
+     * The admin explicitly selects a machine after editing the copied entry.
+     */
+    public function replicating(Server $server): void
+    {
+        $server->machine_id = null;
+    }
+
     public function created(Server $server): void
     {
         $this->notifyMachineNodesChanged($server->machine_id);
