@@ -136,6 +136,21 @@ class NativeRelayTest extends TestCase
         $this->assertSame($service->server_port, $config['server_port']);
     }
 
+    public function test_copy_does_not_inherit_machine_assignment(): void
+    {
+        $machine = $this->makeMachine('service-b');
+        $service = $this->makeServer([
+            'name' => 'B service',
+            'machine_id' => $machine->id,
+        ]);
+
+        $copy = $service->replicate();
+
+        $this->assertNull($copy->machine_id);
+        $this->assertSame($service->server_port, $copy->server_port);
+        $this->assertSame($service->type, $copy->type);
+    }
+
     private function makeMachine(string $name): ServerMachine
     {
         return ServerMachine::create([
