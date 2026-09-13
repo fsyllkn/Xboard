@@ -1,6 +1,5 @@
 <?php
 
-
 namespace App\Http\Requests\Admin;
 
 use App\Models\Server;
@@ -237,6 +236,61 @@ class ServerSave extends FormRequest
         }
 
         return $rules;
+    }
+
+    /**
+     * Native Relay validation is intentionally applied only when both
+     * parent_id and machine_id are set. Parent-only legacy GOST entries keep
+     * their existing behaviour and validation rules.
+     */
+    public function withValidator($validator): void
+    {
+        $validator->after(function ($validator) {
+            $parentId = (int) $this->input('parent_id', 0);
+            $machineId = (int) $this->input('machine_id', 0);
+            if ($parentId <= 0 || $machineId <= 0) {
+                return;
+            }
+
+            $currentId = (int) $this->input('id', 0);
+            if ($currentId > 0 && $parentId === $currentId) {
+                $validator->errors()->add('parent_id', 'Managed Relay 不能将自身设置为父节点');
+                return;
+            }
+
+            $parent = Server::find($parentId);
+            if (!$parent) {
+                $validator->errors()->add('parent_id', 'Managed Relay 的父节点不存在');
+                return;
+            }
+
+            if ($parent->parent_id) {
+                $validator->errors()->add('parent_id', 'Native Relay v1 只允许转发到根服务节点，不支持多级 Relay');
+            }
+
+            $type = Server::normalizeType((string) $this->input('type'));
+            if ($type && $parent->type !== $type) {
+                $validator->errors()->add('parent_id', 'Managed Relay 必须与父节点使用相同协议类型');
+            }
+
+            $listenPort = $this->input('port');
+            if (!$this->isSingleValidPort($listenPort)) {
+                $validator->errors()->add('port', 'Managed Relay 的连接端口必须是 1-65535 的单一端口');
+            }
+
+            if (!$this->isSingleValidPort($parent->server_port)) {
+                $validator->errors()->add('parent_id', '父节点的服务端口必须是 1-65535 的单一端口');
+            }
+        });
+    }
+
+    private function isSingleValidPort(mixed $value): bool
+    {
+        if (!is_numeric($value) || (float) $value !== (float) (int) $value) {
+            return false;
+        }
+        $port = (int) $value;
+        return $port >= 1 && $port <= 65535;
     }
 
     public function attributes(): array
