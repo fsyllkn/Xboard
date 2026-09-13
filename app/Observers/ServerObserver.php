@@ -25,8 +25,20 @@ class ServerObserver
 
     public function updated(Server $server): void
     {
+        $oldParentId = $server->getOriginal('parent_id');
+        $oldMachineId = $server->getOriginal('machine_id');
+        $oldManagedRelay = !empty($oldParentId) && !empty($oldMachineId);
+        $newManagedRelay = !empty($server->parent_id) && !empty($server->machine_id);
+
+        $machineMoved = $server->wasChanged('machine_id');
+        $taskModeChanged = $oldManagedRelay !== $newManagedRelay;
+        $requiresTaskRestart = $machineMoved || $taskModeChanged;
+
         if ($server->wasChanged('group_ids')) {
-            NodeSyncService::notifyFullSync($server->id);
+            // Full sync is useful only when the running task itself is not about to be replaced.
+            if (!$requiresTaskRestart) {
+                NodeSyncService::notifyFullSync($server->id);
+            }
         } elseif ($server->wasChanged([
             'port',
             'server_port',
@@ -38,14 +50,17 @@ class ServerObserver
             'custom_routes',
             'cert_config',
         ])) {
-            NodeSyncService::notifyConfigUpdated($server->id);
+            // Service <-> Relay transitions and machine moves are rebuilt via sync.nodes.
+            // In-place Relay target/listener changes still use sync.config for hot update.
+            if (!$requiresTaskRestart) {
+                NodeSyncService::notifyConfigUpdated($server->id);
+            }
         }
 
-        // A mode or ownership change must rediscover the task, not merely hot-update it.
         if ($server->wasChanged(['machine_id', 'enabled', 'parent_id', 'type'])) {
             $this->notifyMachineChange(
                 $server->machine_id,
-                $server->getOriginal('machine_id')
+                $oldMachineId
             );
         }
 
