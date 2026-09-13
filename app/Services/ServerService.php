@@ -14,9 +14,6 @@ use Illuminate\Support\Collection;
 
 class ServerService
 {
-    /**
-     * 获取所有服务器列表
-     */
     public static function getAllServers(): Collection
     {
         $query = Server::orderBy('sort', 'ASC');
@@ -383,11 +380,17 @@ class ServerService
         if (!$parent) {
             throw new \RuntimeException("Relay parent node {$node->parent_id} does not exist");
         }
+        if ((int) $parent->id === (int) $node->id) {
+            throw new \RuntimeException('Relay cannot target itself');
+        }
         if ($parent->parent_id) {
             throw new \RuntimeException('Nested relay is not supported in native relay v1');
         }
         if (!$parent->enabled) {
             throw new \RuntimeException('Relay parent node is disabled');
+        }
+        if (Server::normalizeType($parent->type) !== Server::normalizeType($node->type)) {
+            throw new \RuntimeException('Relay protocol type must match parent service type');
         }
 
         $listenPort = self::normalizeRelayPort($node->port, 'relay listen port');
@@ -418,7 +421,7 @@ class ServerService
 
     private static function normalizeRelayPort(mixed $port, string $label): int
     {
-        if (!is_numeric($port)) {
+        if (!is_numeric($port) || (float) $port !== (float) (int) $port) {
             throw new \RuntimeException("{$label} must be a single numeric port");
         }
         $port = (int) $port;
