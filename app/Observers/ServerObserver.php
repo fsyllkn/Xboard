@@ -35,7 +35,6 @@ class ServerObserver
         $requiresTaskRestart = $machineMoved || $taskModeChanged;
 
         if ($server->wasChanged('group_ids')) {
-            // Full sync is useful only when the running task itself is not about to be replaced.
             if (!$requiresTaskRestart) {
                 NodeSyncService::notifyFullSync($server->id);
             }
@@ -66,7 +65,9 @@ class ServerObserver
 
         // A root service's endpoint/state is authoritative for all of its managed relays.
         if ($server->wasChanged(['host', 'server_port', 'protocol_settings', 'type', 'enabled', 'parent_id'])) {
-            $topologyChanged = $server->wasChanged(['enabled', 'parent_id']);
+            // A parent type/topology change may make children invalid, so rediscover
+            // their machines instead of trying to hot-load an incompatible config.
+            $topologyChanged = $server->wasChanged(['enabled', 'parent_id', 'type']);
             $this->notifyManagedRelayChildren($server->id, $topologyChanged);
         }
     }
@@ -74,8 +75,6 @@ class ServerObserver
     public function deleted(Server $server): void
     {
         $this->notifyMachineChange(null, $server->getOriginal('machine_id') ?: $server->machine_id);
-
-        // If a real service is deleted, every managed relay pointing at it must disappear.
         $this->notifyManagedRelayChildren($server->id, true);
     }
 
