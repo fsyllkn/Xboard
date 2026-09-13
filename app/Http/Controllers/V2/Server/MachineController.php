@@ -26,6 +26,7 @@ class MachineController extends Controller
                 'id' => $node->id,
                 'type' => $node->type,
                 'name' => $node->name,
+                'mode' => ($node->parent_id && $node->machine_id) ? 'relay' : 'service',
             ])->values();
 
         return response()->json([
