@@ -24,27 +24,30 @@ class NodeSyncService
      */
     public static function notifyConfigUpdated(int $nodeId): void
     {
-        if (!self::isNodeOnline($nodeId))
+        if (!self::isNodeOnline($nodeId)) {
             return;
+        }
 
         $node = Server::find($nodeId);
-        if (!$node)
+        if (!$node) {
             return;
+        }
 
         self::push($nodeId, 'sync.config', ['config' => ServerService::buildNodeConfig($node)]);
     }
 
     /**
-     * Push all users to all nodes in the group
+     * Push all users to all service nodes in the group.
+     * Managed relays never consume user state; the parent service handles auth/accounting.
      */
     public static function notifyUsersUpdatedByGroup(int $groupId): void
     {
-        $servers = Server::whereJsonContains('group_ids', (string) $groupId)
-            ->get();
+        $servers = Server::whereJsonContains('group_ids', (string) $groupId)->get();
 
         foreach ($servers as $server) {
-            if (!self::isNodeOnline($server->id))
+            if (self::isManagedRelay($server) || !self::isNodeOnline($server->id)) {
                 continue;
+            }
 
             $users = ServerService::getAvailableUsers($server)->toArray();
             self::push($server->id, 'sync.users', ['users' => $users]);
@@ -52,17 +55,19 @@ class NodeSyncService
     }
 
     /**
-     * Push user changes (add/remove) to affected nodes
+     * Push user changes (add/remove) to affected service nodes.
      */
     public static function notifyUserChanged(User $user): void
     {
-        if (!$user->group_id)
+        if (!$user->group_id) {
             return;
+        }
 
         $servers = Server::whereJsonContains('group_ids', (string) $user->group_id)->get();
         foreach ($servers as $server) {
-            if (!self::isNodeOnline($server->id))
+            if (self::isManagedRelay($server) || !self::isNodeOnline($server->id)) {
                 continue;
+            }
 
             if ($user->isAvailable()) {
                 self::push($server->id, 'sync.user.delta', [
@@ -86,16 +91,16 @@ class NodeSyncService
     }
 
     /**
-     * Push user removal from a specific group's nodes
+     * Push user removal from a specific group's service nodes.
      */
     public static function notifyUserRemovedFromGroup(int $userId, int $groupId): void
     {
-        $servers = Server::whereJsonContains('group_ids', (string) $groupId)
-            ->get();
+        $servers = Server::whereJsonContains('group_ids', (string) $groupId)->get();
 
         foreach ($servers as $server) {
-            if (!self::isNodeOnline($server->id))
+            if (self::isManagedRelay($server) || !self::isNodeOnline($server->id)) {
                 continue;
+            }
 
             self::push($server->id, 'sync.user.delta', [
                 'action' => 'remove',
@@ -105,25 +110,31 @@ class NodeSyncService
     }
 
     /**
-     * Full sync: push config + users to a node
+     * Full sync: config for every task, users only for real service nodes.
      */
     public static function notifyFullSync(int $nodeId): void
     {
-        if (!self::isNodeOnline($nodeId))
+        if (!self::isNodeOnline($nodeId)) {
             return;
+        }
 
         $node = Server::find($nodeId);
-        if (!$node)
+        if (!$node) {
             return;
+        }
 
         self::push($nodeId, 'sync.config', ['config' => ServerService::buildNodeConfig($node)]);
+
+        if (self::isManagedRelay($node)) {
+            return;
+        }
 
         $users = ServerService::getAvailableUsers($node)->toArray();
         self::push($nodeId, 'sync.users', ['users' => $users]);
     }
 
     /**
-     * Notify machine that its node set has changed.
+     * Notify machine that its task set has changed.
      * Always publishes via Redis so the WS process can update its in-memory registry.
      */
     public static function notifyMachineNodesChanged(int $machineId): void
@@ -137,15 +148,15 @@ class NodeSyncService
                 'id' => $n->id,
                 'type' => $n->type,
                 'name' => $n->name,
+                'mode' => self::isManagedRelay($n) ? 'relay' : 'service',
             ])->values()->toArray();
         }
 
-        // Always publish via Redis so the WS process can update its in-memory registry
         self::pushMachine($machineId, 'sync.nodes', ['nodes' => $nodeList]);
     }
 
     /**
-     * Publish a push command to Redis — picked up by the Workerman WS server
+     * Publish a push command to Redis — picked up by the Workerman WS server.
      */
     public static function push(int $nodeId, string $event, array $data): void
     {
@@ -164,7 +175,7 @@ class NodeSyncService
     }
 
     /**
-     * Publish a machine-level push command to Redis — picked up by the Workerman WS server
+     * Publish a machine-level push command to Redis — picked up by the Workerman WS server.
      */
     public static function pushMachine(int $machineId, string $event, array $data): void
     {
@@ -180,5 +191,10 @@ class NodeSyncService
                 'event' => $event,
             ]);
         }
+    }
+
+    private static function isManagedRelay(Server $server): bool
+    {
+        return !empty($server->parent_id) && !empty($server->machine_id);
     }
 }
