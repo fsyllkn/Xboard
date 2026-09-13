@@ -14,10 +14,8 @@ use Illuminate\Support\Collection;
 
 class ServerService
 {
-
     /**
      * 获取所有服务器列表
-     * @return Collection
      */
     public static function getAllServers(): Collection
     {
@@ -37,21 +35,24 @@ class ServerService
     }
 
     /**
-     * 获取机器下所有已启用节点
+     * 获取机器下所有已启用任务。
+     * Managed Relay 仅在其父节点仍存在、已启用且为根服务节点时下发。
      */
     public static function getMachineNodes(ServerMachine $machine): Collection
     {
         return Server::where('machine_id', $machine->id)
             ->where('enabled', true)
+            ->where(function ($query) {
+                $query->whereNull('parent_id')
+                    ->orWhereHas('parent', function ($parent) {
+                        $parent->where('enabled', true)
+                            ->whereNull('parent_id');
+                    });
+            })
             ->orderBy('sort', 'ASC')
             ->get();
     }
 
-    /**
-     * 获取指定用户可用的服务器列表
-     * @param User $user
-     * @return array
-     */
     public static function getAvailableServers(User $user): array
     {
         $servers = Server::whereJsonContains('group_ids', (string) $user->group_id)
@@ -66,7 +67,6 @@ class ServerService
             ->append(['last_check_at', 'last_push_at', 'online', 'is_online', 'available_status', 'cache_key', 'server_key']);
 
         $servers = collect($servers)->map(function ($server) use ($user) {
-            // 判断动态端口
             if (str_contains($server->port, '-')) {
                 $port = $server->port;
                 $server->port = (int) Helper::randomPort($port);
@@ -82,11 +82,6 @@ class ServerService
         return $servers;
     }
 
-    /**
-     * 根据权限组获取可用的用户列表
-     * @param array $groupIds
-     * @return Collection
-     */
     public static function getAvailableUsers(Server $node)
     {
         $groupIds = $node->group_ids ?? [];
@@ -111,16 +106,11 @@ class ServerService
         return HookManager::filter('server.users.get', $users, $node);
     }
 
-    // 获取路由规则
     public static function getRoutes(array $routeIds)
     {
-        $routes = ServerRoute::select(['id', 'match', 'action', 'action_value'])->whereIn('id', $routeIds)->get();
-        return $routes;
+        return ServerRoute::select(['id', 'match', 'action', 'action_value'])->whereIn('id', $routeIds)->get();
     }
 
-    /**
-     * 处理节点流量数据汇报
-     */
     public static function processTraffic(Server $node, array $traffic): void
     {
         $data = array_filter($traffic, fn($item) =>
@@ -141,9 +131,6 @@ class ServerService
         (new UserService())->trafficFetch($node, $node->type, $data);
     }
 
-    /**
-     * 处理节点在线设备汇报
-     */
     public static function processAlive(int $nodeId, array $alive): void
     {
         $service = app(DeviceStateService::class);
@@ -152,9 +139,6 @@ class ServerService
         }
     }
 
-    /**
-     * 处理节点连接数汇报
-     */
     public static function processOnline(Server $node, array $online): void
     {
         $cacheTime = max(300, (int) admin_setting('server_push_interval', 60) * 3);
@@ -167,9 +151,6 @@ class ServerService
         }
     }
 
-    /**
-     * 处理节点负载状态汇报
-     */
     public static function processStatus(Server $node, array $status): void
     {
         $nodeType = strtoupper($node->type);
@@ -200,9 +181,6 @@ class ServerService
         ], $cacheTime);
     }
 
-    /**
-     * 标记节点心跳
-     */
     public static function touchNode(Server $node): void
     {
         Cache::put(
@@ -212,9 +190,6 @@ class ServerService
         );
     }
 
-    /**
-     * Update node metrics and load status
-     */
     public static function updateMetrics(Server $node, array $metrics): void
     {
         $nodeType = strtoupper($node->type);
@@ -250,12 +225,19 @@ class ServerService
 
     public static function buildNodeConfig(Server $node): array
     {
+        // Backward compatibility: parent-only nodes remain externally managed.
+        // Native Relay is enabled only when both parent_id and machine_id exist.
+        if ($node->parent_id && $node->machine_id) {
+            return self::buildRelayConfig($node);
+        }
+
         $nodeType = $node->type;
         $protocolSettings = $node->protocol_settings;
         $serverPort = $node->server_port;
         $host = $node->host;
 
         $baseConfig = [
+            'mode' => 'service',
             'protocol' => $nodeType,
             'listen_ip' => '0.0.0.0',
             'server_port' => (int) $serverPort,
@@ -270,10 +252,10 @@ class ServerService
                 'plugin' => $protocolSettings['plugin'],
                 'plugin_opts' => $protocolSettings['plugin_opts'],
                 'server_key' => match ($protocolSettings['cipher']) {
-                        '2022-blake3-aes-128-gcm' => Helper::getServerKey($node->created_at, 16),
-                        '2022-blake3-aes-256-gcm' => Helper::getServerKey($node->created_at, 32),
-                        default => null,
-                    },
+                    '2022-blake3-aes-128-gcm' => Helper::getServerKey($node->created_at, 16),
+                    '2022-blake3-aes-256-gcm' => Helper::getServerKey($node->created_at, 32),
+                    default => null,
+                },
             ],
             'vmess' => [
                 ...$baseConfig,
@@ -288,9 +270,9 @@ class ServerService
                 'multiplex' => data_get($protocolSettings, 'multiplex'),
                 'tls' => (int) $protocolSettings['tls'],
                 'tls_settings' => match ((int) $protocolSettings['tls']) {
-                        2 => $protocolSettings['reality_settings'],
-                        default => $protocolSettings['tls_settings'],
-                    },
+                    2 => $protocolSettings['reality_settings'],
+                    default => $protocolSettings['tls_settings'],
+                },
             ],
             'vless' => [
                 ...$baseConfig,
@@ -301,9 +283,9 @@ class ServerService
                     default => null,
                 },
                 'tls_settings' => match ((int) $protocolSettings['tls']) {
-                        2 => $protocolSettings['reality_settings'],
-                        default => $protocolSettings['tls_settings'],
-                    },
+                    2 => $protocolSettings['reality_settings'],
+                    default => $protocolSettings['tls_settings'],
+                },
                 'multiplex' => data_get($protocolSettings, 'multiplex'),
             ],
             'hysteria' => [
@@ -316,13 +298,13 @@ class ServerService
                 'up_mbps' => (int) $protocolSettings['bandwidth']['up'],
                 'down_mbps' => (int) $protocolSettings['bandwidth']['down'],
                 ...match ((int) $protocolSettings['version']) {
-                        1 => ['obfs' => $protocolSettings['obfs']['password'] ?? null],
-                        2 => [
-                            'obfs' => $protocolSettings['obfs']['open'] ? $protocolSettings['obfs']['type'] : null,
-                            'obfs-password' => $protocolSettings['obfs']['password'] ?? null,
-                        ],
-                        default => [],
-                    },
+                    1 => ['obfs' => $protocolSettings['obfs']['password'] ?? null],
+                    2 => [
+                        'obfs' => $protocolSettings['obfs']['open'] ? $protocolSettings['obfs']['type'] : null,
+                        'obfs-password' => $protocolSettings['obfs']['password'] ?? null,
+                    ],
+                    default => [],
+                },
             ],
             'tuic' => [
                 ...$baseConfig,
@@ -383,7 +365,6 @@ class ServerService
 
         if (!empty($node['cert_config'])) {
             $certConfig = $node['cert_config'];
-            // Normalize: accept both "mode" and "cert_mode" from the database
             if (isset($certConfig['mode']) && !isset($certConfig['cert_mode'])) {
                 $certConfig['cert_mode'] = $certConfig['mode'];
                 unset($certConfig['mode']);
@@ -396,12 +377,69 @@ class ServerService
         return $response;
     }
 
-    /**
-     * 根据协议类型和标识获取服务器
-     * @param int $serverId
-     * @param string $serverType
-     * @return Server|null
-     */
+    private static function buildRelayConfig(Server $node): array
+    {
+        $parent = $node->parent;
+        if (!$parent) {
+            throw new \RuntimeException("Relay parent node {$node->parent_id} does not exist");
+        }
+        if ($parent->parent_id) {
+            throw new \RuntimeException('Nested relay is not supported in native relay v1');
+        }
+        if (!$parent->enabled) {
+            throw new \RuntimeException('Relay parent node is disabled');
+        }
+
+        $listenPort = self::normalizeRelayPort($node->port, 'relay listen port');
+        $targetPort = self::normalizeRelayPort($parent->server_port, 'relay target port');
+        $targetHost = trim((string) $parent->host);
+        if ($targetHost === '') {
+            throw new \RuntimeException('Relay target host is empty');
+        }
+
+        return [
+            'mode' => 'relay',
+            // Keep protocol for compatibility with existing config decoders and WS validation.
+            'protocol' => $node->type,
+            'listen_ip' => '0.0.0.0',
+            'server_port' => $targetPort,
+            'network' => null,
+            'networkSettings' => null,
+            'relay' => [
+                'listen_ip' => '0.0.0.0',
+                'listen_port' => $listenPort,
+                'target_host' => $targetHost,
+                'target_port' => $targetPort,
+                'networks' => self::resolveRelayNetworks($parent),
+                'udp_idle_timeout' => 90,
+            ],
+        ];
+    }
+
+    private static function normalizeRelayPort(mixed $port, string $label): int
+    {
+        if (!is_numeric($port)) {
+            throw new \RuntimeException("{$label} must be a single numeric port");
+        }
+        $port = (int) $port;
+        if ($port < 1 || $port > 65535) {
+            throw new \RuntimeException("{$label} must be between 1 and 65535");
+        }
+        return $port;
+    }
+
+    private static function resolveRelayNetworks(Server $parent): array
+    {
+        return match ($parent->type) {
+            Server::TYPE_HYSTERIA, Server::TYPE_TUIC => ['udp'],
+            Server::TYPE_SHADOWSOCKS, Server::TYPE_SOCKS => ['tcp', 'udp'],
+            Server::TYPE_MIERU => strtoupper((string) data_get($parent->protocol_settings, 'transport', 'TCP')) === 'UDP'
+                ? ['udp']
+                : ['tcp'],
+            default => ['tcp'],
+        };
+    }
+
     public static function getServer($serverId, ?string $serverType = null): Server | null
     {
         return Server::query()
