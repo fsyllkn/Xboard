@@ -32,22 +32,36 @@ class ServerService
     }
 
     /**
-     * 获取机器下所有已启用任务。
-     * Managed Relay 仅在其父节点仍存在、已启用且为根服务节点时下发。
+     * 获取机器下所有可运行任务。
+     * Managed Relay 使用 fail-closed 策略：父节点无效、父子类型不一致或
+     * 端口非法时不下发任务，避免继续保留陈旧转发。
      */
     public static function getMachineNodes(ServerMachine $machine): Collection
     {
-        return Server::where('machine_id', $machine->id)
+        return Server::with('parent')
+            ->where('machine_id', $machine->id)
             ->where('enabled', true)
-            ->where(function ($query) {
-                $query->whereNull('parent_id')
-                    ->orWhereHas('parent', function ($parent) {
-                        $parent->where('enabled', true)
-                            ->whereNull('parent_id');
-                    });
-            })
             ->orderBy('sort', 'ASC')
-            ->get();
+            ->get()
+            ->filter(function (Server $node) {
+                if (!$node->parent_id) {
+                    return true;
+                }
+
+                $parent = $node->parent;
+                if (!$parent || !$parent->enabled || $parent->parent_id) {
+                    return false;
+                }
+                if (Server::normalizeType($parent->type) !== Server::normalizeType($node->type)) {
+                    return false;
+                }
+                if (!self::isValidSinglePort($node->port) || !self::isValidSinglePort($parent->server_port)) {
+                    return false;
+                }
+
+                return trim((string) $parent->host) !== '';
+            })
+            ->values();
     }
 
     public static function getAvailableServers(User $user): array
@@ -222,8 +236,6 @@ class ServerService
 
     public static function buildNodeConfig(Server $node): array
     {
-        // Backward compatibility: parent-only nodes remain externally managed.
-        // Native Relay is enabled only when both parent_id and machine_id exist.
         if ($node->parent_id && $node->machine_id) {
             return self::buildRelayConfig($node);
         }
@@ -402,7 +414,6 @@ class ServerService
 
         return [
             'mode' => 'relay',
-            // Keep protocol for compatibility with existing config decoders and WS validation.
             'protocol' => $node->type,
             'listen_ip' => '0.0.0.0',
             'server_port' => $targetPort,
@@ -421,14 +432,19 @@ class ServerService
 
     private static function normalizeRelayPort(mixed $port, string $label): int
     {
+        if (!self::isValidSinglePort($port)) {
+            throw new \RuntimeException("{$label} must be a single port between 1 and 65535");
+        }
+        return (int) $port;
+    }
+
+    private static function isValidSinglePort(mixed $port): bool
+    {
         if (!is_numeric($port) || (float) $port !== (float) (int) $port) {
-            throw new \RuntimeException("{$label} must be a single numeric port");
+            return false;
         }
         $port = (int) $port;
-        if ($port < 1 || $port > 65535) {
-            throw new \RuntimeException("{$label} must be between 1 and 65535");
-        }
-        return $port;
+        return $port >= 1 && $port <= 65535;
     }
 
     private static function resolveRelayNetworks(Server $parent): array
